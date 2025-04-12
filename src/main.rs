@@ -1,5 +1,4 @@
 use core::fmt;
-use core::ops::{Index, Range};
 use std::collections::HashSet;
 
 struct Xoroshiro {
@@ -140,246 +139,105 @@ fn hash_three(x: i32, y: i32, z: i32) -> u64 {
 
 const WORLD_BORDER: i32 = 29_999_984;
 
-struct InteriorRowSegmentIterator<'a> {
-    x: i32,
-    z: i32,
-    noise: &'a BedrockFloorNoise,
-}
-
-impl<'a> InteriorRowSegmentIterator<'a> {
-    fn new(z: i32, noise: &'a BedrockFloorNoise) -> Self {
-        Self {
-            x: -WORLD_BORDER,
-            z,
-            noise,
-        }
-    }
-}
-
-impl Iterator for InteriorRowSegmentIterator<'_> {
-    type Item = Range<i32>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.x <= WORLD_BORDER && !self.noise.is_interior(self.x, self.z) {
-            self.x += 1;
-        }
-        if self.x > WORLD_BORDER {
-            return None;
-        }
-        let x_start = self.x;
-        while self.x <= WORLD_BORDER && self.noise.is_interior(self.x, self.z) {
-            self.x += 1;
-        }
-        let x_end = self.x;
-        Some(x_start..x_end)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct RegionInfo {
+#[derive(Clone)]
+struct ComponentInfo {
     size: u32,
-}
-
-struct Graph<T> {
-    nodes: Vec<GraphNode<T>>,
-}
-
-struct GraphNode<T> {
-    value: T,
-    adjacent_nodes: Vec<u32>,
-}
-
-impl<T> Graph<T> {
-    fn new() -> Self {
-        Self { nodes: Vec::new() }
-    }
-
-    fn add_node(&mut self, value: T) -> u32 {
-        self.nodes.push(GraphNode {
-            value,
-            adjacent_nodes: Vec::new(),
-        });
-        assert!(self.nodes.len() - 1 < u32::MAX as usize, "too many nodes"); // u32::MAX is used as a sentinel value by component explorer
-        (self.nodes.len() - 1) as u32
-    }
-
-    fn add_edge(&mut self, u: u32, v: u32) {
-        self.nodes[u as usize].adjacent_nodes.push(v);
-        self.nodes[v as usize].adjacent_nodes.push(u);
-    }
-
-    fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn new_component_explorer(&self) -> ComponentExplorer<'_, T> {
-        ComponentExplorer {
-            graph: self,
-            component_ids: vec![u32::MAX; self.nodes.len()],
-            n_explored_components: 0,
-        }
-    }
-}
-
-struct ComponentExplorer<'a, T> {
-    graph: &'a Graph<T>,
-    component_ids: Vec<u32>,
-    n_explored_components: u32,
-}
-
-enum ExplorationStatus {
-    New(Vec<u32>),
-    Old,
-}
-
-impl<'a, T> ComponentExplorer<'a, T> {
-    fn explore(&mut self, node_id: u32) -> (u32, ExplorationStatus) {
-        let component_id = self.component_ids[node_id as usize];
-        if component_id != u32::MAX {
-            return (component_id, ExplorationStatus::Old);
-        }
-
-        fn dfs<T>(
-            graph: &Graph<T>,
-            component_ids: &mut [u32],
-            nodes_in_component: &mut Vec<u32>,
-            current_node_id: u32,
-            component_id: u32,
-        ) {
-            component_ids[current_node_id as usize] = component_id;
-            nodes_in_component.push(current_node_id);
-            for neighbor_id in &graph.nodes[current_node_id as usize].adjacent_nodes {
-                if component_ids[*neighbor_id as usize] == u32::MAX {
-                    dfs(graph, component_ids, nodes_in_component, *neighbor_id, component_id);
-                }
-            }
-        }
-
-        let mut nodes_in_component = Vec::new();
-
-        let component_id = self.n_explored_components;
-        self.n_explored_components += 1;
-
-        dfs(
-            &self.graph,
-            &mut self.component_ids,
-            &mut nodes_in_component,
-            node_id,
-            component_id,
-        );
-
-        (component_id, ExplorationStatus::New(nodes_in_component))
-    }
-}
-
-impl<T> Index<u32> for Graph<T> {
-    type Output = T;
-
-    fn index(&self, index: u32) -> &T {
-        &self.nodes[index as usize].value
-    }
+    frontier_size: u32,
 }
 
 fn enumerate_interior_regions(
     noise: &BedrockFloorNoise,
-    mut callback: impl FnMut((i32, i32), RegionInfo),
+    mut callback: impl FnMut((i32, i32), u32),
 ) {
-    let mut cell_is_interior: Vec<bool> = vec![false; WORLD_BORDER as usize * 2 + 1];
+    // This stores component ID for each interior cell. `0` means this is an exterior cell.
+    let mut cell_component: Vec<u32> = vec![0; WORLD_BORDER as usize * 2 + 1];
 
-    // Sorted by key, and the first occurences of each value are 0, 1, 2, ...
-    let mut cell_regions: Vec<(i32, u32)> = Vec::new();
-
-    let mut regions: Vec<RegionInfo> = Vec::new();
+    // Component info. Unallocated components are denoted by frontier size 0.
+    let mut component_info: Vec<ComponentInfo> = vec![
+        ComponentInfo {
+            size: 0,
+            frontier_size: 0,
+        };
+        WORLD_BORDER as usize + 2
+    ];
+    let mut component_allocator_ptr = 1;
 
     for z in -WORLD_BORDER..=-WORLD_BORDER + 10 {
-        let mut graph: Graph<(RegionInfo, Range<i32>)> = Graph::new();
-        for (x, region_id) in &cell_regions {
-            if *region_id == graph.len() as u32 {
-                // First occurence of region. The range does not really mean anything, but lets us
-                // obtain the x later when finalizing the node.
-                graph.add_node((regions[*region_id as usize].clone(), *x..x + 1));
-            }
-        }
+        let mut left = 0;
 
-        let mut next_cell_is_interior: Vec<bool> = vec![false; WORLD_BORDER as usize * 2 + 1];
-        let mut cell_region_iter = cell_regions.into_iter().peekable();
-        for segment in InteriorRowSegmentIterator::new(z, &noise) {
-            let mut size = segment.len() as u32;
+        for x in -WORLD_BORDER..=WORLD_BORDER {
+            let i = (x + WORLD_BORDER) as usize;
 
-            // Find existing regions corresponding to this segment
-            let mut regions_to_merge_with = Vec::new();
-            for x in segment.clone() {
-                next_cell_is_interior[(x + WORLD_BORDER) as usize] = true;
-                if !cell_is_interior[(x + WORLD_BORDER) as usize] {
-                    continue;
-                }
-                // Merge with region above
-                while cell_region_iter.peek().is_some_and(|(top_x, _)| *top_x < x) {
-                    cell_region_iter.next();
-                }
-                if cell_region_iter
-                    .peek()
-                    .is_some_and(|(top_x, _)| *top_x == x)
-                {
-                    let top_region = cell_region_iter.next().unwrap().1;
-                    regions_to_merge_with.push(top_region);
+            let up = cell_component[i];
+
+            let current = if noise.is_interior(x, z) {
+                if left == 0 && up == 0 {
+                    // Create a new current component
+                    while component_info[component_allocator_ptr].frontier_size != 0 {
+                        component_allocator_ptr += 1;
+                        if component_allocator_ptr == component_info.len() {
+                            component_allocator_ptr = 1;
+                        }
+                    }
+                    let component_id = component_allocator_ptr as u32;
+                    component_allocator_ptr += 1;
+                    if component_allocator_ptr == component_info.len() {
+                        component_allocator_ptr = 1;
+                    }
+
+                    component_info[component_id as usize] = ComponentInfo {
+                        size: 1,
+                        frontier_size: 1,
+                    };
+
+                    component_id
+                } else if left == 0 || left == up {
+                    // Reuse up component
+                    component_info[up as usize].size += 1;
+                    up
                 } else {
-                    // Isolated region of size 1 we are not otherwise interested in
-                    size += 1;
+                    // Reuse left component
+                    component_info[left as usize].size += 1;
+                    component_info[left as usize].frontier_size += 1;
+
+                    if up != 0 {
+                        // Merge up into left
+                        component_info[left as usize].size += component_info[up as usize].size;
+
+                        let up_frontier_size = component_info[up as usize].frontier_size;
+                        component_info[left as usize].frontier_size += up_frontier_size - 1;
+
+                        // Remap
+                        for x1 in (x - up_frontier_size as i32 + 1).max(-WORLD_BORDER)
+                            ..(x + up_frontier_size as i32).min(WORLD_BORDER)
+                        {
+                            let i1 = (x1 + WORLD_BORDER) as usize;
+                            if cell_component[i1] == up {
+                                cell_component[i1] = left;
+                            }
+                        }
+
+                        // Drop up
+                        component_info[up as usize].frontier_size = 0;
+                    }
+
+                    left
                 }
-            }
+            } else {
+                if up != 0 {
+                    component_info[up as usize].frontier_size -= 1;
+                    if component_info[up as usize].frontier_size == 0 {
+                        // Finalize and drop up
+                        callback((x, z - 1), component_info[up as usize].size);
+                    }
+                }
 
-            if size == 1 && regions_to_merge_with.len() == 0 {
-                // An isolated region of size 1 we're not interested in storing info for
-                continue;
-            }
+                0
+            };
 
-            let bottom_node = graph.add_node((RegionInfo { size }, segment));
-            for top_node in regions_to_merge_with {
-                graph.add_edge(top_node, bottom_node);
-            }
+            cell_component[i] = current;
+            left = current;
         }
-
-        let mut next_cell_regions: Vec<(i32, u32)> = Vec::new();
-        let mut next_regions: Vec<RegionInfo> = Vec::new();
-
-        let mut components = graph.new_component_explorer();
-
-        for bottom_node in regions.len()..graph.len() {
-            let bottom_node = bottom_node as u32;
-
-            let (region_id, status) = components.explore(bottom_node);
-            if let ExplorationStatus::New(nodes) = status {
-                next_regions.push(RegionInfo {
-                    size: nodes.iter().map(|node| graph[*node].0.size).sum(),
-                });
-            }
-
-            let (_, segment) = &graph[bottom_node];
-            for x in segment.clone() {
-                next_cell_regions.push((x, region_id));
-            }
-        }
-
-        for top_node in 0..regions.len() {
-            let top_node = top_node as u32;
-
-            if let (_, ExplorationStatus::New(_)) = components.explore(top_node) {
-                // A lone top node, finalize it
-                let (region_info, segment) = &graph[top_node];
-                callback((segment.start, z - 1), region_info.clone());
-            }
-        }
-
-        cell_is_interior = next_cell_is_interior;
-        cell_regions = next_cell_regions;
-        regions = next_regions;
-
-        println!(
-            "{} cell->region maps, {} regions",
-            cell_regions.len(),
-            regions.len()
-        );
     }
 }
 
@@ -389,15 +247,15 @@ fn main() {
     let mut best_coords = (0, 0);
     let mut best_size = 0;
 
-    // for z in -30000000..-30000000 + 5 {
-    //     for x in -29994691 - 5..-29994691 + 5 {
+    // for z in -29999983 - 5..-29999983 + 5 {
+    //     for x in -25202376 - 5..-25202376 + 5 {
     //         print!("{}", noise.get_column_type(x, z));
     //     }
     //     println!();
     // }
 
-    enumerate_interior_regions(&noise, |start_coords, region_info| {
-        if region_info.size <= best_size {
+    enumerate_interior_regions(&noise, |start_coords, size| {
+        if size <= best_size {
             return;
         }
 
@@ -442,11 +300,11 @@ fn main() {
 
         println!(
             "found {} (alleged {}) at {:?}",
-            interior_count, region_info.size, start_coords,
+            interior_count, size, start_coords,
         );
-        assert_eq!(interior_count, region_info.size);
+        assert_eq!(interior_count, size);
 
         best_coords = start_coords;
-        best_size = region_info.size;
+        best_size = size;
     });
 }
