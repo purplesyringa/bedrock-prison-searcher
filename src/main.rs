@@ -202,14 +202,14 @@ fn enumerate_interior_regions(
 
                     if up != 0 {
                         // Merge up into left
-                        component_info[left as usize].size += component_info[up as usize].size;
+                        let up_size = component_info[up as usize].size;
 
-                        let up_frontier_size = component_info[up as usize].frontier_size;
-                        component_info[left as usize].frontier_size += up_frontier_size - 1;
+                        component_info[left as usize].size += up_size;
+                        component_info[left as usize].frontier_size += component_info[up as usize].frontier_size - 1;
 
                         // Remap
-                        for x1 in (x - up_frontier_size as i32 + 1).max(-WORLD_BORDER)
-                            ..(x + up_frontier_size as i32).min(WORLD_BORDER)
+                        for x1 in (x - up_size as i32 + 1).max(-WORLD_BORDER)
+                            ..(x + up_size as i32).min(WORLD_BORDER)
                         {
                             let i1 = (x1 + WORLD_BORDER) as usize;
                             if cell_component[i1] == up {
