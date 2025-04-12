@@ -191,37 +191,41 @@ fn enumerate_interior_regions(
                     };
 
                     component_id
-                } else if left == 0 || left == up {
-                    // Reuse up component
-                    component_info[up as usize].size += 1;
-                    up
-                } else {
+                } else if up == 0 {
                     // Reuse left component
                     component_info[left as usize].size += 1;
                     component_info[left as usize].frontier_size += 1;
+                    left
+                } else if left == up {
+                    // Reuse left=up component
+                    component_info[left as usize].size += 1;
+                    left
+                } else {
+                    // Reuse up component
+                    component_info[up as usize].size += 1;
 
-                    if up != 0 {
-                        // Merge up into left
-                        let up_size = component_info[up as usize].size;
+                    if left != 0 {
+                        // Merge left into up
+                        let left_size = component_info[left as usize].size;
 
-                        component_info[left as usize].size += up_size;
-                        component_info[left as usize].frontier_size += component_info[up as usize].frontier_size - 1;
+                        component_info[up as usize].size += left_size;
+                        component_info[up as usize].frontier_size += component_info[left as usize].frontier_size;
 
                         // Remap
-                        for x1 in (x - up_size as i32 + 1).max(-WORLD_BORDER)
-                            ..(x + up_size as i32).min(WORLD_BORDER)
+                        for x1 in (x - left_size as i32).max(-WORLD_BORDER)
+                            ..(x - 1 + left_size as i32).min(WORLD_BORDER)
                         {
                             let i1 = (x1 + WORLD_BORDER) as usize;
-                            if cell_component[i1] == up {
-                                cell_component[i1] = left;
+                            if cell_component[i1] == left {
+                                cell_component[i1] = up;
                             }
                         }
 
-                        // Drop up
-                        component_info[up as usize].frontier_size = 0;
+                        // Drop left
+                        component_info[left as usize].frontier_size = 0;
                     }
 
-                    left
+                    up
                 }
             } else {
                 if up != 0 {
