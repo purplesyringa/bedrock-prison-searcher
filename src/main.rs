@@ -187,65 +187,66 @@ fn main() {
     // }
 
     let start_instant = Instant::now();
+    let mut queue = [(0, 0); 32 * 32];
 
-    enumerate_diagonals(|start_coords| {
-        fn dfs(
-            noise: &BedrockFloorNoise,
-            visited: &mut CoordSet,
-            interior_count: &mut u32,
-            (x, z): (i32, i32),
-            (x0, z0): (i32, i32),
-        ) -> Result<(), ()> {
-            // First cell has already been checked to be an interior
-            if *interior_count > 0 {
-                let ty = if (-WORLD_BORDER..=WORLD_BORDER).contains(&x)
-                    && (-WORLD_BORDER..=WORLD_BORDER).contains(&z)
+    enumerate_diagonals(#[inline(always)] |coords0| {
+        if !noise.is_interior(coords0) {
+            return;
+        }
+
+        let (x0, z0) = coords0;
+
+        let mut visited = CoordSet::new();
+        let mut ptr = 1;
+        visited.insert(coords0);
+        queue[0] = coords0;
+
+        let mut interior_count = 0;
+
+        while ptr > 0 {
+            ptr -= 1;
+            let (x, z) = queue[ptr];
+
+            interior_count += 1;
+
+            // We want all neighbours to be at most 15 blocks away from start so that the whole
+            // component spans at most 31 blocks. Subtract 1 from the boundaries because we're
+            // checking (x, z), not the neighbours themselves.
+            assert!((x0 - x + 14) as u32 <= 28 && (z0 - z + 14) as u32 <= 28, "Out of bounds");
+
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let (x1, z1) = (x + dx, z + dz);
+                let coords1 = (x1, z1);
+
+                if !visited.insert(coords1) {
+                    continue;
+                }
+
+                let ty1 = if (-WORLD_BORDER..=WORLD_BORDER).contains(&x1)
+                    && (-WORLD_BORDER..=WORLD_BORDER).contains(&z1)
                 {
-                    noise.get_column_type((x, z))
+                    noise.get_column_type(coords1)
                 } else {
                     ColumnType::Wall
                 };
-                match ty {
+                match ty1 {
                     ColumnType::Interior => {}
-                    ColumnType::Wall => return Ok(()),
-                    ColumnType::Hazard => return Err(()),
+                    ColumnType::Wall => continue,
+                    ColumnType::Hazard => return,
                 }
+
+                queue[ptr] = coords1;
+                ptr += 1;
             }
-            *interior_count += 1;
-
-            assert!((x0 - x + 31) as u32 <= 62 && (z0 - z + 31) as u32 <= 62, "Out of bounds");
-
-            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let x1 = x + dx;
-                let z1 = z + dz;
-                if visited.insert((x1, z1)) {
-                    dfs(noise, visited, interior_count, (x1, z1), (x0, z0))?;
-                }
-            }
-            Ok(())
-        }
-
-        if !noise.is_interior(start_coords) {
-            return;
-        }
-
-
-        let mut visited = CoordSet::new();
-        visited.insert(start_coords);
-
-        let mut interior_count = 0;
-        if dfs(&noise, &mut visited, &mut interior_count, start_coords, start_coords).is_err() {
-            // Hazard encountered
-            return;
         }
 
         if interior_count > best_size {
             println!(
                 "[{:?}] found {} at {:?}",
-                start_instant.elapsed(), interior_count, start_coords,
+                start_instant.elapsed(), interior_count, coords0,
             );
 
-            best_coords = start_coords;
+            best_coords = coords0;
             best_size = interior_count;
         }
     });
