@@ -1,6 +1,5 @@
 use std::time::Instant;
 use core::fmt;
-use std::collections::HashSet;
 
 struct Xoroshiro {
     low: u64,
@@ -85,11 +84,11 @@ impl BedrockFloorNoise {
         }
     }
 
-    fn is_interior(&self, x: i32, z: i32) -> bool {
+    fn is_interior(&self, (x, z): (i32, i32)) -> bool {
         !self.is_bedrock(x, -63, z) && !self.is_bedrock(x, -62, z)
     }
 
-    fn get_column_type(&self, x: i32, z: i32) -> ColumnType {
+    fn get_column_type(&self, (x, z): (i32, i32)) -> ColumnType {
         // .. -> Interior
         // .# -> Wall
         // ## -> Wall
@@ -139,110 +138,38 @@ fn hash_three(x: i32, y: i32, z: i32) -> u64 {
 }
 
 const WORLD_BORDER: i32 = 29_999_984;
+const SEARCH_RADIUS: i32 = 4;
 
-#[derive(Clone)]
-struct ComponentInfo {
-    size: u32,
-    frontier_size: u32,
+fn enumerate_diagonals(mut callback: impl FnMut((i32, i32))) {
+    for z0 in (-WORLD_BORDER..=-WORLD_BORDER + 100).step_by(SEARCH_RADIUS as usize * 2) {
+        for (x, dz) in (-WORLD_BORDER..=WORLD_BORDER).zip((0..=SEARCH_RADIUS).chain((0..SEARCH_RADIUS).rev()).cycle()) {
+            if dz > 0 {
+                callback((x, z0 + dz - 1));
+            }
+            if dz != SEARCH_RADIUS {
+                callback((x, z0 + 2 * SEARCH_RADIUS - 1 - dz));
+            }
+        }
+    }
 }
 
-fn enumerate_interior_regions(
-    noise: &BedrockFloorNoise,
-    mut callback: impl FnMut((i32, i32), u32),
-) {
-    // This stores component ID for each interior cell. `0` means this is an exterior cell.
-    let mut cell_component: Vec<u32> = vec![0; WORLD_BORDER as usize * 2 + 1];
+struct CoordSet {
+    values: [u32; 32],
+}
 
-    // Component info. Unallocated components are denoted by frontier size 0.
-    let mut component_info: Vec<ComponentInfo> = vec![
-        ComponentInfo {
-            size: 0,
-            frontier_size: 0,
-        };
-        WORLD_BORDER as usize + 2
-    ];
-    let mut component_allocator_ptr = 1;
-
-    for z in -WORLD_BORDER..=-WORLD_BORDER + 10 {
-        let mut left = 0;
-
-        for x in -WORLD_BORDER..=WORLD_BORDER {
-            let i = (x + WORLD_BORDER) as usize;
-
-            let up = cell_component[i];
-
-            let current = if noise.is_interior(x, z) {
-                if left == 0 && up == 0 {
-                    // Create a new current component
-                    while component_info[component_allocator_ptr].frontier_size != 0 {
-                        component_allocator_ptr += 1;
-                        if component_allocator_ptr == component_info.len() {
-                            component_allocator_ptr = 1;
-                        }
-                    }
-                    let component_id = component_allocator_ptr as u32;
-                    component_allocator_ptr += 1;
-                    if component_allocator_ptr == component_info.len() {
-                        component_allocator_ptr = 1;
-                    }
-
-                    component_info[component_id as usize] = ComponentInfo {
-                        size: 1,
-                        frontier_size: 1,
-                    };
-
-                    component_id
-                } else if up == 0 {
-                    // Reuse left component
-                    component_info[left as usize].size += 1;
-                    component_info[left as usize].frontier_size += 1;
-                    left
-                } else if left == up {
-                    // Reuse left=up component
-                    component_info[left as usize].size += 1;
-                    left
-                } else {
-                    // Reuse up component
-                    component_info[up as usize].size += 1;
-
-                    if left != 0 {
-                        // Merge left into up
-                        let left_size = component_info[left as usize].size;
-
-                        component_info[up as usize].size += left_size;
-                        component_info[up as usize].frontier_size += component_info[left as usize].frontier_size;
-
-                        // Remap
-                        for x1 in (x - left_size as i32).max(-WORLD_BORDER)
-                            ..(x - 1 + left_size as i32).min(WORLD_BORDER)
-                        {
-                            let i1 = (x1 + WORLD_BORDER) as usize;
-                            if cell_component[i1] == left {
-                                cell_component[i1] = up;
-                            }
-                        }
-
-                        // Drop left
-                        component_info[left as usize].frontier_size = 0;
-                    }
-
-                    up
-                }
-            } else {
-                if up != 0 {
-                    component_info[up as usize].frontier_size -= 1;
-                    if component_info[up as usize].frontier_size == 0 {
-                        // Finalize and drop up
-                        callback((x, z - 1), component_info[up as usize].size);
-                    }
-                }
-
-                0
-            };
-
-            cell_component[i] = current;
-            left = current;
+impl CoordSet {
+    fn new() -> Self {
+        Self {
+            values: [0; 32],
         }
+    }
+
+    fn insert(&mut self, (x, z): (i32, i32)) -> bool {
+        let row = &mut self.values[z as usize & 31];
+        let bit = x as usize & 31;
+        let ret = (*row >> bit) & 1 == 0;
+        *row |= 1 << bit;
+        ret
     }
 }
 
@@ -252,8 +179,8 @@ fn main() {
     let mut best_coords = (0, 0);
     let mut best_size = 0;
 
-    // for z in -29999983 - 5..-29999983 + 5 {
-    //     for x in -25202376 - 5..-25202376 + 5 {
+    // for z in -29993432 - 10..-29993432 + 10 {
+    //     for x in -20877857 - 10..-20877857 + 10 {
     //         print!("{}", noise.get_column_type(x, z));
     //     }
     //     println!();
@@ -261,57 +188,65 @@ fn main() {
 
     let start_instant = Instant::now();
 
-    enumerate_interior_regions(&noise, |start_coords, size| {
-        if size <= best_size {
-            return;
-        }
-
+    enumerate_diagonals(|start_coords| {
         fn dfs(
             noise: &BedrockFloorNoise,
-            visited: &mut HashSet<(i32, i32)>,
+            visited: &mut CoordSet,
             interior_count: &mut u32,
             (x, z): (i32, i32),
+            (x0, z0): (i32, i32),
         ) -> Result<(), ()> {
-            visited.insert((x, z));
-
-            let ty = if (-WORLD_BORDER..=WORLD_BORDER).contains(&x)
-                && (-WORLD_BORDER..=WORLD_BORDER).contains(&z)
-            {
-                noise.get_column_type(x, z)
-            } else {
-                ColumnType::Wall
-            };
-            match ty {
-                ColumnType::Interior => {}
-                ColumnType::Wall => return Ok(()),
-                ColumnType::Hazard => return Err(()),
+            // First cell has already been checked to be an interior
+            if *interior_count > 0 {
+                let ty = if (-WORLD_BORDER..=WORLD_BORDER).contains(&x)
+                    && (-WORLD_BORDER..=WORLD_BORDER).contains(&z)
+                {
+                    noise.get_column_type((x, z))
+                } else {
+                    ColumnType::Wall
+                };
+                match ty {
+                    ColumnType::Interior => {}
+                    ColumnType::Wall => return Ok(()),
+                    ColumnType::Hazard => return Err(()),
+                }
             }
             *interior_count += 1;
+
+            assert!((x0 - x + 31) as u32 <= 62 && (z0 - z + 31) as u32 <= 62, "Out of bounds");
 
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                 let x1 = x + dx;
                 let z1 = z + dz;
-                if !visited.contains(&(x1, z1)) {
-                    dfs(noise, visited, interior_count, (x1, z1))?;
+                if visited.insert((x1, z1)) {
+                    dfs(noise, visited, interior_count, (x1, z1), (x0, z0))?;
                 }
             }
             Ok(())
         }
 
-        let mut visited = HashSet::new();
+        if !noise.is_interior(start_coords) {
+            return;
+        }
+
+
+        let mut visited = CoordSet::new();
+        visited.insert(start_coords);
+
         let mut interior_count = 0;
-        if dfs(&noise, &mut visited, &mut interior_count, start_coords).is_err() {
+        if dfs(&noise, &mut visited, &mut interior_count, start_coords, start_coords).is_err() {
             // Hazard encountered
             return;
         }
 
-        println!(
-            "[{:?}] found {} (alleged {}) at {:?}",
-            start_instant.elapsed(), interior_count, size, start_coords,
-        );
-        assert_eq!(interior_count, size);
+        if interior_count > best_size {
+            println!(
+                "[{:?}] found {} at {:?}",
+                start_instant.elapsed(), interior_count, start_coords,
+            );
 
-        best_coords = start_coords;
-        best_size = size;
+            best_coords = start_coords;
+            best_size = interior_count;
+        }
     });
 }
