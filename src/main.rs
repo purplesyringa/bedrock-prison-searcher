@@ -1,5 +1,5 @@
-use std::time::Instant;
 use core::fmt;
+use std::time::Instant;
 
 struct Xoroshiro {
     low: u64,
@@ -142,7 +142,9 @@ const SEARCH_RADIUS: i32 = 4;
 
 fn enumerate_diagonals(mut callback: impl FnMut((i32, i32))) {
     for z0 in (-WORLD_BORDER..=-WORLD_BORDER + 100).step_by(SEARCH_RADIUS as usize * 2) {
-        for (x, dz) in (-WORLD_BORDER..=WORLD_BORDER).zip((0..=SEARCH_RADIUS).chain((0..SEARCH_RADIUS).rev()).cycle()) {
+        for (x, dz) in (-WORLD_BORDER..=WORLD_BORDER)
+            .zip((0..=SEARCH_RADIUS).chain((0..SEARCH_RADIUS).rev()).cycle())
+        {
             if dz > 0 {
                 callback((x, z0 + dz - 1));
             }
@@ -159,9 +161,7 @@ struct CoordSet {
 
 impl CoordSet {
     fn new() -> Self {
-        Self {
-            values: [0; 32],
-        }
+        Self { values: [0; 32] }
     }
 
     fn insert(&mut self, (x, z): (i32, i32)) -> bool {
@@ -189,65 +189,73 @@ fn main() {
     let start_instant = Instant::now();
     let mut queue = [(0, 0); 32 * 32];
 
-    enumerate_diagonals(#[inline(always)] |coords0| {
-        if !noise.is_interior(coords0) {
-            return;
-        }
-
-        let (x0, z0) = coords0;
-
-        let mut visited = CoordSet::new();
-        let mut ptr = 1;
-        visited.insert(coords0);
-        queue[0] = coords0;
-
-        let mut interior_count = 0;
-
-        while ptr > 0 {
-            ptr -= 1;
-            let (x, z) = queue[ptr];
-
-            interior_count += 1;
-
-            // We want all neighbours to be at most 15 blocks away from start so that the whole
-            // component spans at most 31 blocks. Subtract 1 from the boundaries because we're
-            // checking (x, z), not the neighbours themselves.
-            assert!((x0 - x + 14) as u32 <= 28 && (z0 - z + 14) as u32 <= 28, "Out of bounds");
-
-            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let (x1, z1) = (x + dx, z + dz);
-                let coords1 = (x1, z1);
-
-                if !visited.insert(coords1) {
-                    continue;
-                }
-
-                let ty1 = if (-WORLD_BORDER..=WORLD_BORDER).contains(&x1)
-                    && (-WORLD_BORDER..=WORLD_BORDER).contains(&z1)
-                {
-                    noise.get_column_type(coords1)
-                } else {
-                    ColumnType::Wall
-                };
-                match ty1 {
-                    ColumnType::Interior => {}
-                    ColumnType::Wall => continue,
-                    ColumnType::Hazard => return,
-                }
-
-                queue[ptr] = coords1;
-                ptr += 1;
+    enumerate_diagonals(
+        #[inline(always)]
+        |coords0| {
+            if !noise.is_interior(coords0) {
+                return;
             }
-        }
 
-        if interior_count > best_size {
-            println!(
-                "[{:?}] found {} at {:?}",
-                start_instant.elapsed(), interior_count, coords0,
-            );
+            let (x0, z0) = coords0;
 
-            best_coords = coords0;
-            best_size = interior_count;
-        }
-    });
+            let mut visited = CoordSet::new();
+            let mut ptr = 1;
+            visited.insert(coords0);
+            queue[0] = coords0;
+
+            let mut interior_count = 0;
+
+            while ptr > 0 {
+                ptr -= 1;
+                let (x, z) = queue[ptr];
+
+                interior_count += 1;
+
+                // We want all neighbours to be at most 15 blocks away from start so that the whole
+                // component spans at most 31 blocks. Subtract 1 from the boundaries because we're
+                // checking (x, z), not the neighbours themselves.
+                assert!(
+                    (x0 - x + 14) as u32 <= 28 && (z0 - z + 14) as u32 <= 28,
+                    "Out of bounds"
+                );
+
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    let (x1, z1) = (x + dx, z + dz);
+                    let coords1 = (x1, z1);
+
+                    if !visited.insert(coords1) {
+                        continue;
+                    }
+
+                    let ty1 = if (-WORLD_BORDER..=WORLD_BORDER).contains(&x1)
+                        && (-WORLD_BORDER..=WORLD_BORDER).contains(&z1)
+                    {
+                        noise.get_column_type(coords1)
+                    } else {
+                        ColumnType::Wall
+                    };
+                    match ty1 {
+                        ColumnType::Interior => {}
+                        ColumnType::Wall => continue,
+                        ColumnType::Hazard => return,
+                    }
+
+                    queue[ptr] = coords1;
+                    ptr += 1;
+                }
+            }
+
+            if interior_count > best_size {
+                println!(
+                    "[{:?}] found {} at {:?}",
+                    start_instant.elapsed(),
+                    interior_count,
+                    coords0,
+                );
+
+                best_coords = coords0;
+                best_size = interior_count;
+            }
+        },
+    );
 }
