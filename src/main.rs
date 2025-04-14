@@ -1,3 +1,4 @@
+use std::time::Instant;
 use core::fmt;
 use std::collections::HashSet;
 
@@ -258,6 +259,8 @@ fn main() {
     //     println!();
     // }
 
+    let start_instant = Instant::now();
+
     enumerate_interior_regions(&noise, |start_coords, size| {
         if size <= best_size {
             return;
@@ -303,8 +306,8 @@ fn main() {
         }
 
         println!(
-            "found {} (alleged {}) at {:?}",
-            interior_count, size, start_coords,
+            "[{:?}] found {} (alleged {}) at {:?}",
+            start_instant.elapsed(), interior_count, size, start_coords,
         );
         assert_eq!(interior_count, size);
 
