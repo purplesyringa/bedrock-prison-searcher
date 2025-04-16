@@ -271,6 +271,118 @@ impl CoordSet {
     }
 }
 
+struct ComponentSizeFinder {
+    queue_x: [i32; 32 * 32 + 8],
+    queue_z: [i32; 32 * 32 + 8],
+}
+
+impl ComponentSizeFinder {
+    fn new() -> Self {
+        Self {
+            queue_x: [0; 32 * 32 + 8],
+            queue_z: [0; 32 * 32 + 8],
+        }
+    }
+
+    #[inline(always)]
+    fn get_component_size(
+        &mut self,
+        noise: &BedrockFloorNoise,
+        (x0, z0): (i32, i32),
+        best_size: usize,
+    ) -> Option<usize> {
+        let mut visited = CoordSet::new();
+        visited.insert((x0, z0));
+
+        let mut queue_head = 4;
+        let mut queue_tail = 4;
+
+        let neigh_x = i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0]);
+        let neigh_z = i32x4::splat(z0) + i32x4::from([0, 0, -1, 1]);
+        neigh_x.copy_to_slice(&mut self.queue_x);
+        neigh_z.copy_to_slice(&mut self.queue_z);
+
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            visited.insert((x0 + dx, z0 + dz));
+        }
+
+        let mut x = neigh_x.resize(0);
+        let mut z = neigh_z.resize(0);
+        let mut in_bounds_mask = mask64x8::from_bitmask(0x0f);
+
+        let mut interior_count = 1;
+
+        loop {
+            let in_world_mask = ((x + i32x8::splat(WORLD_BORDER))
+                .cast::<u32>()
+                .simd_max((z + i32x8::splat(WORLD_BORDER)).cast::<u32>())
+                .simd_le(u32x8::splat(2 * WORLD_BORDER as u32)))
+            .cast();
+
+            let interior_mask = noise.is_interior_vec(x, z);
+
+            let mut interior_bitmask =
+                (in_bounds_mask & interior_mask & in_world_mask).to_bitmask();
+            while interior_bitmask != 0 {
+                let index = interior_bitmask.trailing_zeros() as usize;
+                let (x, z) = (x[index], z[index]);
+                interior_bitmask &= interior_bitmask - 1;
+
+                interior_count += 1;
+
+                // We want all neighbours to be at most 15 blocks away from start so that the
+                // whole component spans at most 31 blocks. Subtract 1 from the boundaries
+                // because we're checking (x, z), not the neighbours themselves.
+                assert!(
+                    (x0 - x + 14) as u32 <= 28 && (z0 - z + 14) as u32 <= 28,
+                    "Out of bounds"
+                );
+
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    let (x1, z1) = (x + dx, z + dz);
+                    if visited.insert((x1, z1)) {
+                        self.queue_x[queue_tail] = x1;
+                        self.queue_z[queue_tail] = z1;
+                        queue_tail += 1;
+                    }
+                }
+            }
+
+            if queue_head == queue_tail {
+                break;
+            }
+
+            x = i32x8::from_slice(&self.queue_x[queue_head..]);
+            z = i32x8::from_slice(&self.queue_z[queue_head..]);
+
+            in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
+                .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
+
+            queue_head = (queue_head + 8).min(queue_tail);
+        }
+
+        if interior_count <= best_size {
+            return None;
+        }
+
+        queue_head = 0;
+        while queue_head < queue_tail {
+            let x = i32x8::from_slice(&self.queue_x[queue_head..]);
+            let z = i32x8::from_slice(&self.queue_z[queue_head..]);
+
+            let in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
+                .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
+
+            if (noise.is_hazard_vec(x, z) & in_bounds_mask).any() {
+                return None;
+            }
+            queue_head += 8;
+        }
+
+        Some(interior_count)
+    }
+}
+
 fn main() {
     let noise = BedrockFloorNoise::from_world_seed(-972064012444369952i64 as u64);
 
@@ -286,117 +398,29 @@ fn main() {
 
     let start_instant = Instant::now();
 
-    let mut queue_x = [0; 32 * 32 + 8];
-    let mut queue_z = [0; 32 * 32 + 8];
-
     println!(
         "Searching for components >= {} (might find smaller ones as well, but not all of them)",
         (SEARCH_RADIUS - 1) * SEARCH_RADIUS * 2 + 2
     );
 
+    let mut component_size_finder = ComponentSizeFinder::new();
+
     enumerate_diagonals(
         &noise,
         #[inline(always)]
         |coords0| {
-            let (x0, z0) = coords0;
+            if let Some(size) = component_size_finder.get_component_size(&noise, coords0, best_size)
+            {
+                println!(
+                    "[{:?}] found {} at {:?}",
+                    start_instant.elapsed(),
+                    size,
+                    coords0,
+                );
 
-            let mut visited = CoordSet::new();
-            visited.insert(coords0);
-
-            let mut queue_head = 4;
-            let mut queue_tail = 4;
-
-            let neigh_x = i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0]);
-            let neigh_z = i32x4::splat(z0) + i32x4::from([0, 0, -1, 1]);
-            neigh_x.copy_to_slice(&mut queue_x);
-            neigh_z.copy_to_slice(&mut queue_z);
-
-            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                visited.insert((x0 + dx, z0 + dz));
+                best_coords = coords0;
+                best_size = size;
             }
-
-            let mut x = neigh_x.resize(0);
-            let mut z = neigh_z.resize(0);
-            let mut in_bounds_mask = mask64x8::from_bitmask(0x0f);
-
-            let mut interior_count = 1;
-
-            loop {
-                let in_world_mask = ((x + i32x8::splat(WORLD_BORDER))
-                    .cast::<u32>()
-                    .simd_max((z + i32x8::splat(WORLD_BORDER)).cast::<u32>())
-                    .simd_le(u32x8::splat(2 * WORLD_BORDER as u32)))
-                .cast();
-
-                let interior_mask = noise.is_interior_vec(x, z);
-
-                let mut interior_bitmask =
-                    (in_bounds_mask & interior_mask & in_world_mask).to_bitmask();
-                while interior_bitmask != 0 {
-                    let index = interior_bitmask.trailing_zeros() as usize;
-                    let (x, z) = (x[index], z[index]);
-                    interior_bitmask &= interior_bitmask - 1;
-
-                    interior_count += 1;
-
-                    // We want all neighbours to be at most 15 blocks away from start so that the
-                    // whole component spans at most 31 blocks. Subtract 1 from the boundaries
-                    // because we're checking (x, z), not the neighbours themselves.
-                    assert!(
-                        (x0 - x + 14) as u32 <= 28 && (z0 - z + 14) as u32 <= 28,
-                        "Out of bounds"
-                    );
-
-                    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                        let (x1, z1) = (x + dx, z + dz);
-                        if visited.insert((x1, z1)) {
-                            queue_x[queue_tail] = x1;
-                            queue_z[queue_tail] = z1;
-                            queue_tail += 1;
-                        }
-                    }
-                }
-
-                if queue_head == queue_tail {
-                    break;
-                }
-
-                x = i32x8::from_slice(&queue_x[queue_head..]);
-                z = i32x8::from_slice(&queue_z[queue_head..]);
-
-                in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
-                    .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
-
-                queue_head = (queue_head + 8).min(queue_tail);
-            }
-
-            if interior_count <= best_size {
-                return;
-            }
-
-            queue_head = 0;
-            while queue_head < queue_tail {
-                let x = i32x8::from_slice(&queue_x[queue_head..]);
-                let z = i32x8::from_slice(&queue_z[queue_head..]);
-
-                let in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
-                    .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
-
-                if (noise.is_hazard_vec(x, z) & in_bounds_mask).any() {
-                    return;
-                }
-                queue_head += 8;
-            }
-
-            println!(
-                "[{:?}] found {} at {:?}",
-                start_instant.elapsed(),
-                interior_count,
-                coords0,
-            );
-
-            best_coords = coords0;
-            best_size = interior_count;
         },
     );
 }
