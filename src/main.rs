@@ -416,9 +416,6 @@ impl ComponentWalker {
 fn main() {
     let noise = BedrockFloorNoise::from_world_seed(-972064012444369952i64 as u64);
 
-    let mut best_coords = (0, 0);
-    let mut best_size = 0;
-
     // for z in -29963411 - 10..-29963411 + 10 {
     //     for x in -29999605 - 10..-29999605 + 10 {
     //         print!("{}", noise.get_column_type((x, z)));
@@ -428,9 +425,11 @@ fn main() {
 
     let start_instant = Instant::now();
 
+    let interesting_size = (SEARCH_RADIUS - 1) * SEARCH_RADIUS * 2 + 2;
+
     println!(
         "Searching for components >= {} (might find smaller ones as well, but not all of them)",
-        (SEARCH_RADIUS - 1) * SEARCH_RADIUS * 2 + 2
+        interesting_size
     );
 
     let mut walker = ComponentWalker::new();
@@ -442,7 +441,8 @@ fn main() {
             let Some(size) = walker.get_component_size_ignoring_hazards(&noise, coords0) else {
                 return;
             };
-            if size <= best_size || walker.component_borders_hazards(&noise, coords0) {
+            if size < interesting_size as usize || walker.component_borders_hazards(&noise, coords0)
+            {
                 return;
             }
 
@@ -452,9 +452,6 @@ fn main() {
                 size,
                 coords0,
             );
-
-            best_coords = coords0;
-            best_size = size;
         },
     );
 }
