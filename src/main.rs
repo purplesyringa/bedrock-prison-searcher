@@ -141,15 +141,20 @@ const WORLD_BORDER: i32 = 29_999_984;
 const SEARCH_RADIUS: i32 = 4;
 
 fn enumerate_diagonals(mut callback: impl FnMut((i32, i32))) {
-    for z0 in (-WORLD_BORDER..=-WORLD_BORDER + 100).step_by(SEARCH_RADIUS as usize * 2) {
-        for (x, dz) in (-WORLD_BORDER..=WORLD_BORDER)
-            .zip((0..=SEARCH_RADIUS).chain((0..SEARCH_RADIUS).rev()).cycle())
-        {
-            if dz > 0 {
-                callback((x, z0 + dz - 1));
-            }
-            if dz != SEARCH_RADIUS {
-                callback((x, z0 + 2 * SEARCH_RADIUS - 1 - dz));
+    for i in (-2 * WORLD_BORDER..=2 * WORLD_BORDER).step_by(2 * SEARCH_RADIUS as usize).take(10000) {
+        // Main diagonals
+        let j_min = -WORLD_BORDER - i.min(0);
+        let j_max = WORLD_BORDER - i.max(0);
+        for j in j_min..=j_max {
+            callback((j, i + j));
+        }
+
+        // Anti-diagonals
+        let j_min = -WORLD_BORDER + i.max(0);
+        let j_max = WORLD_BORDER + i.min(0);
+        for j in j_min..=j_max {
+            if j % SEARCH_RADIUS != 0 {
+                callback((j, i - j));
             }
         }
     }
