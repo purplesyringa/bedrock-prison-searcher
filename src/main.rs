@@ -275,6 +275,8 @@ fn main() {
     let start_instant = Instant::now();
     let mut queue = [(0, 0); 32 * 32];
 
+    println!("Searching for components >= {} (might find smaller ones as well, but not all of them)", (SEARCH_RADIUS - 1) * SEARCH_RADIUS * 2 + 2);
+
     enumerate_diagonals(
         &noise,
         #[inline(always)]
