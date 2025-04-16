@@ -172,6 +172,12 @@ const WORLD_BORDER: i32 = 29_999_984;
 const SEARCH_RADIUS: i32 = 4;
 
 fn enumerate_diagonals(noise: &BedrockFloorNoise, mut callback: impl FnMut((i32, i32))) {
+    let mut total: u64 = 0;
+    for i in (-2 * WORLD_BORDER..=2 * WORLD_BORDER).step_by(2 * SEARCH_RADIUS as usize) {
+        total += (2 * WORLD_BORDER - i.abs()) as u64;
+    }
+
+    let mut current = 0;
     for i in (-2 * WORLD_BORDER..=2 * WORLD_BORDER)
         .step_by(2 * SEARCH_RADIUS as usize)
         .take(10000)
@@ -179,6 +185,12 @@ fn enumerate_diagonals(noise: &BedrockFloorNoise, mut callback: impl FnMut((i32,
         // Main diagonals
         let mut j_min = -WORLD_BORDER - i.min(0);
         let j_max = WORLD_BORDER - i.max(0);
+
+        current += (j_max - j_min) as u64;
+        if i % 2003 == 0 {
+            println!("{}% checked", current as f32 / total as f32 * 100.0);
+        }
+
         while j_min + 7 <= j_max {
             let x = i32x8::splat(j_min) + i32x8::from([0, 1, 2, 3, 4, 5, 6, 7]);
             let z = i32x8::splat(i) + x;
