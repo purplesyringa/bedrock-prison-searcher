@@ -3,7 +3,7 @@
 use core::fmt;
 use std::simd::{
     cmp::{SimdOrd, SimdPartialOrd},
-    i32x4, i32x8, i64x8, mask64x8,
+    i32x4, i32x8, i32x16, i64x8, mask64x8,
     num::SimdInt,
     simd_swizzle, u32x8, u32x16, u64x8,
 };
@@ -284,16 +284,15 @@ impl CoordSet {
 }
 
 struct ComponentWalker {
-    large_stack_x: [i32; 8 + 32 * 32],
-    large_stack_z: [i32; 8 + 32 * 32],
+    large_stack_x: [i32; 32 * 32],
+    large_stack_z: [i32; 32 * 32],
 }
 
 impl ComponentWalker {
     fn new() -> Self {
         Self {
-            // First 8 elements need to be outside world border
-            large_stack_x: [i32::MIN; 8 + 32 * 32],
-            large_stack_z: [0; 8 + 32 * 32],
+            large_stack_x: [0; 32 * 32],
+            large_stack_z: [0; 32 * 32],
         }
     }
 
@@ -305,24 +304,29 @@ impl ComponentWalker {
     ) -> Option<usize> {
         let mut visited = CoordSet::new();
         visited.insert((x0, z0));
-
-        let mut stack_size = 0;
-
-        let neigh_x = i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0]);
-        let neigh_z = i32x4::splat(z0) + i32x4::from([0, 0, -1, 1]);
-        neigh_x.copy_to_slice(&mut self.large_stack_x[8..]);
-        neigh_z.copy_to_slice(&mut self.large_stack_z[8..]);
-
         for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
             visited.insert((x0 + dx, z0 + dz));
         }
 
-        let mut x = neigh_x.resize(i32::MIN);
-        let mut z = neigh_z.resize(0);
+        let mut small_stack_size = 4;
+        let mut large_stack_size = 0;
+
+        // Unfilled elements must be outside the world border
+        let mut small_stack_x: i32x16 =
+            (i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0])).resize(i32::MIN);
+        let mut small_stack_z: i32x16 = (i32x4::splat(z0) + i32x4::from([0, 0, -1, 1])).resize(0);
 
         let mut interior_count = 1;
 
-        loop {
+        while small_stack_size > 0 {
+            let x: i32x8 = small_stack_x.resize(0);
+            let z: i32x8 = small_stack_z.resize(0);
+
+            small_stack_size = small_stack_size.max(8) - 8;
+            small_stack_x =
+                simd_swizzle!(small_stack_x, [8, 9, 10, 11, 12, 13, 14, 15]).resize(i32::MIN);
+            small_stack_z = simd_swizzle!(small_stack_z, [8, 9, 10, 11, 12, 13, 14, 15]).resize(0);
+
             let in_world_mask = ((x + i32x8::splat(WORLD_BORDER))
                 .cast::<u32>()
                 .simd_max((z + i32x8::splat(WORLD_BORDER)).cast::<u32>())
@@ -342,20 +346,43 @@ impl ComponentWalker {
                 for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                     let (x1, z1) = (x + dx, z + dz);
                     if visited.insert((x1, z1)) {
-                        self.large_stack_x[8 + stack_size] = x1;
-                        self.large_stack_z[8 + stack_size] = z1;
-                        stack_size += 1;
+                        if small_stack_size < 16 {
+                            small_stack_x = simd_swizzle!(small_stack_x, i32x16::splat(x1), [
+                                16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+                            ]);
+                            small_stack_z = simd_swizzle!(small_stack_z, i32x16::splat(z1), [
+                                16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+                            ]);
+                            small_stack_size += 1;
+                        } else {
+                            self.large_stack_x[large_stack_size] = x1;
+                            self.large_stack_z[large_stack_size] = z1;
+                            large_stack_size += 1;
+                        }
                     }
                 }
             }
+        }
 
-            if stack_size == 0 {
-                break;
+        while large_stack_size > 0 {
+            large_stack_size -= 1;
+            let x = self.large_stack_x[large_stack_size];
+            let z = self.large_stack_z[large_stack_size];
+
+            if !(x.abs() <= WORLD_BORDER && z.abs() <= WORLD_BORDER && noise.is_interior((x, z))) {
+                continue;
             }
 
-            x = i32x8::from_slice(&self.large_stack_x[stack_size..]);
-            z = i32x8::from_slice(&self.large_stack_z[stack_size..]);
-            stack_size = stack_size.max(8) - 8;
+            interior_count += 1;
+
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let (x1, z1) = (x + dx, z + dz);
+                if visited.insert((x1, z1)) {
+                    self.large_stack_x[large_stack_size] = x1;
+                    self.large_stack_z[large_stack_size] = z1;
+                    large_stack_size += 1;
+                }
+            }
         }
 
         // `visited` loops at 32, so we want to ensure we haven't accidentally mistaken a far away
@@ -384,13 +411,13 @@ impl ComponentWalker {
         visited.insert((x0, z0));
 
         let mut stack_size = 1;
-        self.large_stack_x[8] = x0;
-        self.large_stack_z[8] = z0;
+        self.large_stack_x[0] = x0;
+        self.large_stack_z[0] = z0;
 
         while stack_size > 0 {
             stack_size -= 1;
-            let x = self.large_stack_x[8 + stack_size];
-            let z = self.large_stack_z[8 + stack_size];
+            let x = self.large_stack_x[stack_size];
+            let z = self.large_stack_z[stack_size];
 
             let ty = if x.abs() <= WORLD_BORDER && z.abs() <= WORLD_BORDER {
                 noise.get_column_type((x, z))
@@ -408,8 +435,8 @@ impl ComponentWalker {
                 // No need for bounds check on visited because `get_component_size_ignoring_hazards`
                 // has already performed it.
                 if visited.insert((x1, z1)) {
-                    self.large_stack_x[8 + stack_size] = x1;
-                    self.large_stack_z[8 + stack_size] = z1;
+                    self.large_stack_x[stack_size] = x1;
+                    self.large_stack_z[stack_size] = z1;
                     stack_size += 1;
                 }
             }
