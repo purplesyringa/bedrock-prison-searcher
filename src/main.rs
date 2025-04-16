@@ -305,21 +305,14 @@ impl ComponentWalker {
     ) -> Option<usize> {
         let mut visited = CoordSet::new();
         visited.insert((x0, z0));
-
-        let mut stack_size = 0;
-
-        let neigh_x = i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0]);
-        let neigh_z = i32x4::splat(z0) + i32x4::from([0, 0, -1, 1]);
-        neigh_x.copy_to_slice(&mut self.large_stack_x[8..]);
-        neigh_z.copy_to_slice(&mut self.large_stack_z[8..]);
-
         for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
             visited.insert((x0 + dx, z0 + dz));
         }
 
-        let mut x = neigh_x.resize(i32::MIN);
-        let mut z = neigh_z.resize(0);
+        let mut x = (i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0])).resize(i32::MIN);
+        let mut z = (i32x4::splat(z0) + i32x4::from([0, 0, -1, 1])).resize(0);
 
+        let mut stack_size = 0;
         let mut interior_count = 1;
 
         loop {
@@ -355,7 +348,7 @@ impl ComponentWalker {
 
             x = i32x8::from_slice(&self.large_stack_x[stack_size..]);
             z = i32x8::from_slice(&self.large_stack_z[stack_size..]);
-            stack_size = stack_size.max(8) - 8;
+            stack_size = stack_size.saturating_sub(8);
         }
 
         // `visited` loops at 32, so we want to ensure we haven't accidentally mistaken a far away
@@ -363,8 +356,8 @@ impl ComponentWalker {
         // there's an empty row or column, which naturally acts as a barrier of propagation; if no
         // such barriers exists, we enter the sad path. This hasn't ever been triggered yet, so I
         // haven't implemented it, but it would require switching `visited` to a `HashSet`. We run
-        // the assert only if the interior count is large enough for performance reasons.
-        if interior_count >= 16 {
+        // the assert only if the interior count is large enough for this to matter.
+        if interior_count >= 30 {
             assert!(
                 visited.has_empty_row() && visited.has_empty_column(),
                 "Possibly lost some blocks"
