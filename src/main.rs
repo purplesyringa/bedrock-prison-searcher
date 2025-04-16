@@ -3,7 +3,7 @@
 use core::fmt;
 use std::simd::{
     cmp::{SimdOrd, SimdPartialOrd},
-    i32x8, i64x8, mask64x8,
+    i32x4, i32x8, i64x8, mask64x8,
     num::SimdInt,
     u32x8, u64x8,
 };
@@ -303,27 +303,25 @@ fn main() {
             let mut visited = CoordSet::new();
             visited.insert(coords0);
 
-            let mut queue_head = 0;
-            let mut queue_tail = 0;
+            let mut queue_head = 4;
+            let mut queue_tail = 4;
+
+            let neigh_x = i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0]);
+            let neigh_z = i32x4::splat(z0) + i32x4::from([0, 0, -1, 1]);
+            neigh_x.copy_to_slice(&mut queue_x);
+            neigh_z.copy_to_slice(&mut queue_z);
+
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let (x1, z1) = (x0 + dx, z0 + dz);
-                queue_x[queue_tail] = x1;
-                queue_z[queue_tail] = z1;
-                queue_tail += 1;
-                visited.insert((x1, z1));
+                visited.insert((x0 + dx, z0 + dz));
             }
+
+            let mut x = neigh_x.resize(0);
+            let mut z = neigh_z.resize(0);
+            let mut in_bounds_mask = mask64x8::from_bitmask(0x0f);
 
             let mut interior_count = 1;
 
-            while queue_head < queue_tail {
-                let x = i32x8::from_slice(&queue_x[queue_head..]);
-                let z = i32x8::from_slice(&queue_z[queue_head..]);
-
-                let in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
-                    .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
-
-                queue_head = (queue_head + 8).min(queue_tail);
-
+            loop {
                 let in_world_mask = ((x + i32x8::splat(WORLD_BORDER))
                     .cast::<u32>()
                     .simd_max((z + i32x8::splat(WORLD_BORDER)).cast::<u32>())
@@ -358,6 +356,18 @@ fn main() {
                         }
                     }
                 }
+
+                if queue_head == queue_tail {
+                    break;
+                }
+
+                x = i32x8::from_slice(&queue_x[queue_head..]);
+                z = i32x8::from_slice(&queue_z[queue_head..]);
+
+                in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
+                    .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
+
+                queue_head = (queue_head + 8).min(queue_tail);
             }
 
             if interior_count <= best_size {
