@@ -186,7 +186,8 @@ fn enumerate_diagonals(noise: &BedrockFloorNoise, mut callback: impl FnMut((i32,
     let mut current = 0;
     for i in (-2 * WORLD_BORDER..=2 * WORLD_BORDER)
         .step_by(2 * SEARCH_RADIUS as usize)
-        .take(10000)
+        .skip(500000)
+        .take(400000)
     {
         // Main diagonals
         let mut j_min = -WORLD_BORDER - i.min(0);
