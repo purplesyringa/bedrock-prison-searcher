@@ -5,7 +5,7 @@ use std::simd::{
     cmp::{SimdOrd, SimdPartialOrd},
     i32x4, i32x8, i64x8, mask64x8,
     num::SimdInt,
-    u32x8, u64x8,
+    simd_swizzle, u32x8, u32x16, u64x8,
 };
 use std::time::Instant;
 
@@ -136,15 +136,9 @@ impl BedrockFloorNoise {
             }
         }
     }
-
-    fn is_hazard_vec(&self, x: i32x8, z: i32x8) -> mask64x8 {
-        let a = self.is_bedrock_vec(x, -63, z);
-        let b = self.is_bedrock_vec(x, -62, z);
-        let c = self.is_bedrock_vec(x, -61, z);
-        a & !b & !c
-    }
 }
 
+#[derive(Clone, Copy, Debug)]
 enum ColumnType {
     Interior,
     Wall,
@@ -269,46 +263,62 @@ impl CoordSet {
         *row |= 1 << bit;
         ret
     }
+
+    #[inline(always)]
+    fn has_empty_row(&self) -> bool {
+        self.values.contains(&0)
+    }
+
+    fn has_empty_column(&self) -> bool {
+        // LLVM can autovectorize this
+        //     self.values.iter().copied().fold(0, |a, b| a | b) != u32::MAX
+        // just fine, but when combined with a call to has_empty_row(), it leads to an abomination
+        // for no good reason. Vectorize this manually.
+        let v = u32x16::from_slice(&self.values[..16]) | u32x16::from_slice(&self.values[16..]);
+        let v = simd_swizzle!(v, [0, 1, 2, 3, 4, 5, 6, 7])
+            | simd_swizzle!(v, [8, 9, 10, 11, 12, 13, 14, 15]);
+        let v = simd_swizzle!(v, [0, 1, 2, 3]) | simd_swizzle!(v, [4, 5, 6, 7]);
+        let v = simd_swizzle!(v, [0, 1]) | simd_swizzle!(v, [2, 3]);
+        (v[0] | v[1]) != u32::MAX
+    }
 }
 
-struct ComponentSizeFinder {
-    queue_x: [i32; 32 * 32 + 8],
-    queue_z: [i32; 32 * 32 + 8],
+struct ComponentWalker {
+    list_x: [i32; 8 + 32 * 32],
+    list_z: [i32; 8 + 32 * 32],
 }
 
-impl ComponentSizeFinder {
+impl ComponentWalker {
     fn new() -> Self {
         Self {
-            queue_x: [0; 32 * 32 + 8],
-            queue_z: [0; 32 * 32 + 8],
+            // First 8 elements need to be outside world border
+            list_x: [i32::MIN; 8 + 32 * 32],
+            list_z: [0; 8 + 32 * 32],
         }
     }
 
     #[inline(always)]
-    fn get_component_size(
+    fn get_component_size_ignoring_hazards(
         &mut self,
         noise: &BedrockFloorNoise,
         (x0, z0): (i32, i32),
-        best_size: usize,
     ) -> Option<usize> {
         let mut visited = CoordSet::new();
         visited.insert((x0, z0));
 
-        let mut queue_head = 4;
-        let mut queue_tail = 4;
+        let mut stack_size = 0;
 
         let neigh_x = i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0]);
         let neigh_z = i32x4::splat(z0) + i32x4::from([0, 0, -1, 1]);
-        neigh_x.copy_to_slice(&mut self.queue_x);
-        neigh_z.copy_to_slice(&mut self.queue_z);
+        neigh_x.copy_to_slice(&mut self.list_x[8..]);
+        neigh_z.copy_to_slice(&mut self.list_z[8..]);
 
         for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
             visited.insert((x0 + dx, z0 + dz));
         }
 
-        let mut x = neigh_x.resize(0);
+        let mut x = neigh_x.resize(i32::MIN);
         let mut z = neigh_z.resize(0);
-        let mut in_bounds_mask = mask64x8::from_bitmask(0x0f);
 
         let mut interior_count = 1;
 
@@ -321,8 +331,7 @@ impl ComponentSizeFinder {
 
             let interior_mask = noise.is_interior_vec(x, z);
 
-            let mut interior_bitmask =
-                (in_bounds_mask & interior_mask & in_world_mask).to_bitmask();
+            let mut interior_bitmask = (interior_mask & in_world_mask).to_bitmask();
             while interior_bitmask != 0 {
                 let index = interior_bitmask.trailing_zeros() as usize;
                 let (x, z) = (x[index], z[index]);
@@ -330,56 +339,83 @@ impl ComponentSizeFinder {
 
                 interior_count += 1;
 
-                // We want all neighbours to be at most 15 blocks away from start so that the
-                // whole component spans at most 31 blocks. Subtract 1 from the boundaries
-                // because we're checking (x, z), not the neighbours themselves.
-                assert!(
-                    (x0 - x + 14) as u32 <= 28 && (z0 - z + 14) as u32 <= 28,
-                    "Out of bounds"
-                );
-
                 for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                     let (x1, z1) = (x + dx, z + dz);
                     if visited.insert((x1, z1)) {
-                        self.queue_x[queue_tail] = x1;
-                        self.queue_z[queue_tail] = z1;
-                        queue_tail += 1;
+                        self.list_x[8 + stack_size] = x1;
+                        self.list_z[8 + stack_size] = z1;
+                        stack_size += 1;
                     }
                 }
             }
 
-            if queue_head == queue_tail {
+            if stack_size == 0 {
                 break;
             }
 
-            x = i32x8::from_slice(&self.queue_x[queue_head..]);
-            z = i32x8::from_slice(&self.queue_z[queue_head..]);
-
-            in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
-                .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
-
-            queue_head = (queue_head + 8).min(queue_tail);
+            x = i32x8::from_slice(&self.list_x[stack_size..]);
+            z = i32x8::from_slice(&self.list_z[stack_size..]);
+            stack_size = stack_size.max(8) - 8;
         }
 
-        if interior_count <= best_size {
-            return None;
-        }
-
-        queue_head = 0;
-        while queue_head < queue_tail {
-            let x = i32x8::from_slice(&self.queue_x[queue_head..]);
-            let z = i32x8::from_slice(&self.queue_z[queue_head..]);
-
-            let in_bounds_mask = i64x8::from([0, 1, 2, 3, 4, 5, 6, 7])
-                .simd_lt(i64x8::splat((queue_tail - queue_head) as i64));
-
-            if (noise.is_hazard_vec(x, z) & in_bounds_mask).any() {
-                return None;
-            }
-            queue_head += 8;
+        // `visited` loops at 32, so we want to ensure we haven't accidentally mistaken a far away
+        // block for being visited. The simplest way to ensure this hasn't happened is to check that
+        // there's an empty row or column, which naturally acts as a barrier of propagation; if no
+        // such barriers exists, we enter the sad path. This hasn't ever been triggered yet, so I
+        // haven't implemented it, but it would require switching `visited` to a `HashSet`. We run
+        // the assert only if the interior count is large enough for performance reasons.
+        if interior_count >= 16 {
+            assert!(
+                visited.has_empty_row() && visited.has_empty_column(),
+                "Possibly lost some blocks"
+            );
         }
 
         Some(interior_count)
+    }
+
+    #[inline(always)]
+    fn component_borders_hazards(
+        &mut self,
+        noise: &BedrockFloorNoise,
+        (x0, z0): (i32, i32),
+    ) -> bool {
+        let mut visited = CoordSet::new();
+        visited.insert((x0, z0));
+
+        let mut stack_size = 1;
+        self.list_x[8] = x0;
+        self.list_z[8] = z0;
+
+        while stack_size > 0 {
+            stack_size -= 1;
+            let x = self.list_x[8 + stack_size];
+            let z = self.list_z[8 + stack_size];
+
+            let ty = if x.abs() <= WORLD_BORDER && z.abs() <= WORLD_BORDER {
+                noise.get_column_type((x, z))
+            } else {
+                ColumnType::Wall
+            };
+            match ty {
+                ColumnType::Interior => {}
+                ColumnType::Wall => continue,
+                ColumnType::Hazard => return true,
+            }
+
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let (x1, z1) = (x + dx, z + dz);
+                // No need for bounds check on visited because `get_component_size_ignoring_hazards`
+                // has already performed it.
+                if visited.insert((x1, z1)) {
+                    self.list_x[8 + stack_size] = x1;
+                    self.list_z[8 + stack_size] = z1;
+                    stack_size += 1;
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -389,9 +425,9 @@ fn main() {
     let mut best_coords = (0, 0);
     let mut best_size = 0;
 
-    // for z in -29993432 - 10..-29993432 + 10 {
-    //     for x in -20877857 - 10..-20877857 + 10 {
-    //         print!("{}", noise.get_column_type(x, z));
+    // for z in -29963411 - 10..-29963411 + 10 {
+    //     for x in -29999605 - 10..-29999605 + 10 {
+    //         print!("{}", noise.get_column_type((x, z)));
     //     }
     //     println!();
     // }
@@ -403,24 +439,28 @@ fn main() {
         (SEARCH_RADIUS - 1) * SEARCH_RADIUS * 2 + 2
     );
 
-    let mut component_size_finder = ComponentSizeFinder::new();
+    let mut walker = ComponentWalker::new();
 
     enumerate_diagonals(
         &noise,
         #[inline(always)]
         |coords0| {
-            if let Some(size) = component_size_finder.get_component_size(&noise, coords0, best_size)
-            {
-                println!(
-                    "[{:?}] found {} at {:?}",
-                    start_instant.elapsed(),
-                    size,
-                    coords0,
-                );
-
-                best_coords = coords0;
-                best_size = size;
+            let Some(size) = walker.get_component_size_ignoring_hazards(&noise, coords0) else {
+                return;
+            };
+            if size <= best_size || walker.component_borders_hazards(&noise, coords0) {
+                return;
             }
+
+            println!(
+                "[{:?}] found {} at {:?}",
+                start_instant.elapsed(),
+                size,
+                coords0,
+            );
+
+            best_coords = coords0;
+            best_size = size;
         },
     );
 }
