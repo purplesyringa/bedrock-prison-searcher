@@ -284,16 +284,16 @@ impl CoordSet {
 }
 
 struct ComponentWalker {
-    list_x: [i32; 8 + 32 * 32],
-    list_z: [i32; 8 + 32 * 32],
+    large_stack_x: [i32; 8 + 32 * 32],
+    large_stack_z: [i32; 8 + 32 * 32],
 }
 
 impl ComponentWalker {
     fn new() -> Self {
         Self {
             // First 8 elements need to be outside world border
-            list_x: [i32::MIN; 8 + 32 * 32],
-            list_z: [0; 8 + 32 * 32],
+            large_stack_x: [i32::MIN; 8 + 32 * 32],
+            large_stack_z: [0; 8 + 32 * 32],
         }
     }
 
@@ -310,8 +310,8 @@ impl ComponentWalker {
 
         let neigh_x = i32x4::splat(x0) + i32x4::from([-1, 1, 0, 0]);
         let neigh_z = i32x4::splat(z0) + i32x4::from([0, 0, -1, 1]);
-        neigh_x.copy_to_slice(&mut self.list_x[8..]);
-        neigh_z.copy_to_slice(&mut self.list_z[8..]);
+        neigh_x.copy_to_slice(&mut self.large_stack_x[8..]);
+        neigh_z.copy_to_slice(&mut self.large_stack_z[8..]);
 
         for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
             visited.insert((x0 + dx, z0 + dz));
@@ -342,8 +342,8 @@ impl ComponentWalker {
                 for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                     let (x1, z1) = (x + dx, z + dz);
                     if visited.insert((x1, z1)) {
-                        self.list_x[8 + stack_size] = x1;
-                        self.list_z[8 + stack_size] = z1;
+                        self.large_stack_x[8 + stack_size] = x1;
+                        self.large_stack_z[8 + stack_size] = z1;
                         stack_size += 1;
                     }
                 }
@@ -353,8 +353,8 @@ impl ComponentWalker {
                 break;
             }
 
-            x = i32x8::from_slice(&self.list_x[stack_size..]);
-            z = i32x8::from_slice(&self.list_z[stack_size..]);
+            x = i32x8::from_slice(&self.large_stack_x[stack_size..]);
+            z = i32x8::from_slice(&self.large_stack_z[stack_size..]);
             stack_size = stack_size.max(8) - 8;
         }
 
@@ -384,13 +384,13 @@ impl ComponentWalker {
         visited.insert((x0, z0));
 
         let mut stack_size = 1;
-        self.list_x[8] = x0;
-        self.list_z[8] = z0;
+        self.large_stack_x[8] = x0;
+        self.large_stack_z[8] = z0;
 
         while stack_size > 0 {
             stack_size -= 1;
-            let x = self.list_x[8 + stack_size];
-            let z = self.list_z[8 + stack_size];
+            let x = self.large_stack_x[8 + stack_size];
+            let z = self.large_stack_z[8 + stack_size];
 
             let ty = if x.abs() <= WORLD_BORDER && z.abs() <= WORLD_BORDER {
                 noise.get_column_type((x, z))
@@ -408,8 +408,8 @@ impl ComponentWalker {
                 // No need for bounds check on visited because `get_component_size_ignoring_hazards`
                 // has already performed it.
                 if visited.insert((x1, z1)) {
-                    self.list_x[8 + stack_size] = x1;
-                    self.list_z[8 + stack_size] = z1;
+                    self.large_stack_x[8 + stack_size] = x1;
+                    self.large_stack_z[8 + stack_size] = z1;
                     stack_size += 1;
                 }
             }
