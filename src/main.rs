@@ -184,18 +184,18 @@ fn enumerate_diagonals(noise: &BedrockFloorNoise, mut callback: impl FnMut((i32,
     }
 
     let mut current = 0;
-    for i in (-2 * WORLD_BORDER..=2 * WORLD_BORDER)
-        .step_by(2 * SEARCH_RADIUS as usize)
-        .skip(500000)
-        .take(400000)
-    {
+    let mut previous_percentage = 0;
+
+    for i in (-2 * WORLD_BORDER..=2 * WORLD_BORDER).step_by(2 * SEARCH_RADIUS as usize) {
         // Main diagonals
         let mut j_min = -WORLD_BORDER - i.min(0);
         let j_max = WORLD_BORDER - i.max(0);
 
         current += (j_max - j_min) as u64;
-        if i % 2003 == 0 {
-            println!("{}% checked", current as f32 / total as f32 * 100.0);
+        let percentage = 10000 * current / total;
+        if percentage > previous_percentage {
+            println!("{:.2}% checked", percentage as f32 / 100.0);
+            previous_percentage = percentage;
         }
 
         while j_min + 7 <= j_max {
