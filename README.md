@@ -6,7 +6,7 @@ I am interested in finding *large* naturally generated prisons. [The original be
 
 You'll need a Zen 4 processor for the brute-force to be efficient. It takes 1 month to scan a world seed (within world borders) in single-thread. Multi-thread support is not implemented, but is easy to add if necessary; the algorithm scales just fine. No checkpoint mechanism is implemented, but that is also easy to add if necessary.
 
-I haven't completed the full search for any seed yet; the largest prison I've found spans 25 blocks and is located at `28939509 -62 -28625251` on seed `-972064012444369952`. In its current state, the program only searches for prisons of size 26 and larger; I haven't encountered any such prisons yet.
+I haven't completed the full search for any seed yet; the largest prison I've found spans 29 blocks and is located at `29474815 -62 -20172057` on seed `-972064012444369952`. In its current state, the program only searches for prisons of size 26 and larger; it would need to be modified (and slowed down) to recognize all smaller prsions.
 
 To compile the code, change the world seed in `main.rs` and run `RUSTFLAGS="-C target-cpu=znver4" cargo build --release`.
 
